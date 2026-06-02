@@ -1,6 +1,6 @@
 {
 	"FileVersion": 3,
-	"EngineAssociation": "5.7",
+	"EngineAssociation": "b7588a24-737d-4946-ba25-06acfd34bf1a",
 	"Category": "Samples",
 	"Description": "",
 	"Modules": [
@@ -342,6 +342,10 @@
 		{
 			"Name": "Reflex",
 			"Enabled": true
+		},
+		{
+			"Name": "RiderLink",
+			"Enabled": false
 		}
 	],
 	"EpicSampleNameHash": "451731683"
