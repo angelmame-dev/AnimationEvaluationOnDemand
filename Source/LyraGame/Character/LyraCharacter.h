@@ -12,6 +12,7 @@
 
 #define UE_API LYRAGAME_API
 
+class ULagCompensationComponent;
 class AActor;
 class AController;
 class ALyraPlayerController;
@@ -199,6 +200,9 @@ private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lyra|Character", Meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<ULyraCameraComponent> CameraComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Lyra|Character", Meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<ULagCompensationComponent> LagCompensationComponent;
 
 	UPROPERTY(Transient, ReplicatedUsing = OnRep_ReplicatedAcceleration)
 	FLyraReplicatedAcceleration ReplicatedAcceleration;
