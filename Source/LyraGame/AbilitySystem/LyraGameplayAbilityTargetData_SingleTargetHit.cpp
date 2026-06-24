@@ -26,6 +26,7 @@ bool FLyraGameplayAbilityTargetData_SingleTargetHit::NetSerialize(FArchive& Ar, 
 	FGameplayAbilityTargetData_SingleTargetHit::NetSerialize(Ar, Map, bOutSuccess);
 
 	Ar << CartridgeID;
+	Ar << ClientFireServerTime;
 
 	return true;
 }

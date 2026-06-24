@@ -89,7 +89,7 @@ protected:
 
 protected:
 	static int32 FindFirstPawnHitResult(const TArray<FHitResult>& HitResults);
-
+	
 	// Does a single weapon trace, either sweeping or ray depending on if SweepRadius is above zero
 	FHitResult WeaponTrace(const FVector& StartTrace, const FVector& EndTrace, float SweepRadius, bool bIsSimulated, OUT TArray<FHitResult>& OutHitResults) const;
 

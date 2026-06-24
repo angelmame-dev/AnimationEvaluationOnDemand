@@ -10,6 +10,9 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystem/LyraGameplayAbilityTargetData_SingleTargetHit.h"
 #include "DrawDebugHelpers.h"
+#include "LagCompensationManager.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerState.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(LyraGameplayAbility_RangedWeapon)
 
@@ -492,7 +495,7 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 			MyAbilityComponent->CallServerSetReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey(), LocalTargetDataHandle, ApplicationTag, MyAbilityComponent->ScopedPredictionKey);
 		}
 
-		const bool bIsTargetDataValid = true;
+		bool bIsTargetDataValid = true;
 
 		bool bProjectileWeapon = false;
 
@@ -503,6 +506,37 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 			{
 				if (Controller->GetLocalRole() == ROLE_Authority)
 				{
+					if (ULagCompensationManager* LagCompensationManager = GetWorld()->GetSubsystem<ULagCompensationManager>())
+					{
+						double ClientFireServerTime = 0.0;
+						FVector TraceStart = FVector::ZeroVector;
+						FVector TraceEnd   = FVector::ZeroVector;
+
+						if (const FGameplayAbilityTargetData* FirstData = LocalTargetDataHandle.Get(0))
+						{
+							if (const FHitResult* Hit = FirstData->GetHitResult())
+							{
+								TraceStart = Hit->TraceStart;
+								TraceEnd   = Hit->TraceEnd;
+							}
+							if (const FLyraGameplayAbilityTargetData_SingleTargetHit* LyraData = static_cast<const FLyraGameplayAbilityTargetData_SingleTargetHit*>(FirstData))
+							{
+								ClientFireServerTime = LyraData->ClientFireServerTime;
+							}
+						}						
+
+						TArray<FHitResult> RewindHits;
+						LagCompensationManager->RewindAndTrace(ClientFireServerTime, GetAvatarActorFromActorInfo(),
+							[&](TArray<FHitResult>& Out)
+							{
+								ULyraRangedWeaponInstance* WeaponData = GetWeaponInstance();
+								check(WeaponData);
+								WeaponTrace(TraceStart, TraceEnd, WeaponData->GetBulletTraceSweepRadius(), /*bIsSimulated=*/true, Out);
+							}, RewindHits);
+
+						UE_LOG(LogLyraAbilitySystem, Log, TEXT("LagComp: ClientFire=%.3f hits=%d"), ClientFireServerTime, RewindHits.Num());
+					}
+					
 					// Confirm hit markers
 					if (ULyraWeaponStateComponent* WeaponStateComponent = Controller->FindComponentByClass<ULyraWeaponStateComponent>())
 					{
@@ -575,13 +609,16 @@ void ULyraGameplayAbility_RangedWeapon::StartRangedWeaponTargeting()
 	if (FoundHits.Num() > 0)
 	{
 		const int32 CartridgeID = FMath::Rand();
-
+		const AGameStateBase* GameState = GetWorld()->GetGameState();
+		const double ServerWorldTimeSeconds = GameState ? GameState->GetServerWorldTimeSeconds() : 0.0;
+		
 		for (const FHitResult& FoundHit : FoundHits)
 		{
 			FLyraGameplayAbilityTargetData_SingleTargetHit* NewTargetData = new FLyraGameplayAbilityTargetData_SingleTargetHit();
 			NewTargetData->HitResult = FoundHit;
 			NewTargetData->CartridgeID = CartridgeID;
-
+			NewTargetData->ClientFireServerTime = ServerWorldTimeSeconds;
+		
 			TargetData.Add(NewTargetData);
 		}
 	}

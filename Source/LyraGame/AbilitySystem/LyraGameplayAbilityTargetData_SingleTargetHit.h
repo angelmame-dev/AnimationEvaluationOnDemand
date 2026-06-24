@@ -18,6 +18,7 @@ struct FLyraGameplayAbilityTargetData_SingleTargetHit : public FGameplayAbilityT
 
 	FLyraGameplayAbilityTargetData_SingleTargetHit()
 		: CartridgeID(-1)
+		, ClientFireServerTime(0.0)
 	{ }
 
 	virtual void AddTargetDataToContext(FGameplayEffectContextHandle& Context, bool bIncludeActorArray) const override;
@@ -25,6 +26,10 @@ struct FLyraGameplayAbilityTargetData_SingleTargetHit : public FGameplayAbilityT
 	/** ID to allow the identification of multiple bullets that were part of the same cartridge */
 	UPROPERTY()
 	int32 CartridgeID;
+
+	/** Server-synced timestamp (GetServerWorldTimeSeconds) at the moment the client fired */
+	UPROPERTY()
+	double ClientFireServerTime;
 
 	bool NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess);
 
