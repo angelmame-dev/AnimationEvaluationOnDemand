@@ -10,6 +10,7 @@
 #include "AbilitySystemComponent.h"
 #include "AbilitySystem/LyraGameplayAbilityTargetData_SingleTargetHit.h"
 #include "DrawDebugHelpers.h"
+#include "LagCompensatedPlayerController.h"
 #include "LagCompensationManager.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
@@ -488,62 +489,146 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 
 		// Take ownership of the target data to make sure no callbacks into game code invalidate it out from under us
 		FGameplayAbilityTargetDataHandle LocalTargetDataHandle(MoveTemp(const_cast<FGameplayAbilityTargetDataHandle&>(InData)));
+		
+		// Creation of new validated handle containing only corroborated entries.
+		FGameplayAbilityTargetDataHandle ValidatedTargetDataHandle;
+		ValidatedTargetDataHandle.UniqueId = LocalTargetDataHandle.UniqueId;
 
+		const FGameplayAbilityTargetDataHandle* TargetDataHandle = &LocalTargetDataHandle;
+		
 		const bool bShouldNotifyServer = CurrentActorInfo->IsLocallyControlled() && !CurrentActorInfo->IsNetAuthority();
 		if (bShouldNotifyServer)
 		{
 			MyAbilityComponent->CallServerSetReplicatedTargetData(CurrentSpecHandle, CurrentActivationInfo.GetActivationPredictionKey(), LocalTargetDataHandle, ApplicationTag, MyAbilityComponent->ScopedPredictionKey);
 		}
 
-		bool bIsTargetDataValid = true;
-
+		const bool bIsTargetDataValid = true;
 		bool bProjectileWeapon = false;
-
+		
 #if WITH_SERVER_CODE
 		if (!bProjectileWeapon)
 		{
 			if (AController* Controller = GetControllerFromActorInfo())
 			{
 				if (Controller->GetLocalRole() == ROLE_Authority)
-				{
+				{					
 					if (ULagCompensationManager* LagCompensationManager = GetWorld()->GetSubsystem<ULagCompensationManager>())
 					{
+						// Creation of new handle containing only the entries to corroborate.
+						FGameplayAbilityTargetDataHandle ToValidateTargetDataHandle;
+						ToValidateTargetDataHandle.UniqueId = LocalTargetDataHandle.UniqueId;
+						
 						double ClientFireServerTime = 0.0;
-						FVector TraceStart = FVector::ZeroVector;
-						FVector TraceEnd   = FVector::ZeroVector;
-
-						if (const FGameplayAbilityTargetData* FirstData = LocalTargetDataHandle.Get(0))
+						TArray<const FHitResult*> HitsToValidate;
+						for (uint8 i = 0; (i < LocalTargetDataHandle.Num()) && (i < 255); ++i)
 						{
-							if (const FHitResult* Hit = FirstData->GetHitResult())
+							FGameplayAbilityTargetData* TargetData = LocalTargetDataHandle.Get(i);
+							if (!TargetData)
 							{
-								TraceStart = Hit->TraceStart;
-								TraceEnd   = Hit->TraceEnd;
+								continue;
 							}
-							if (const FLyraGameplayAbilityTargetData_SingleTargetHit* LyraData = static_cast<const FLyraGameplayAbilityTargetData_SingleTargetHit*>(FirstData))
+							const FHitResult* Hit = TargetData->GetHitResult();
+							if (!Hit)
 							{
-								ClientFireServerTime = LyraData->ClientFireServerTime;
+								continue;
 							}
-						}						
-
-						TArray<FHitResult> RewindHits;
-						LagCompensationManager->RewindAndTrace(ClientFireServerTime, GetAvatarActorFromActorInfo(),
-							[&](TArray<FHitResult>& Out)
+							
+							HitsToValidate.Add(Hit);
+							ToValidateTargetDataHandle.Data.Add(LocalTargetDataHandle.Data[i]);
+							
+							if (ClientFireServerTime == 0.0)
 							{
-								ULyraRangedWeaponInstance* WeaponData = GetWeaponInstance();
-								check(WeaponData);
-								WeaponTrace(TraceStart, TraceEnd, WeaponData->GetBulletTraceSweepRadius(), /*bIsSimulated=*/true, Out);
-							}, RewindHits);
+								if (const FLyraGameplayAbilityTargetData_SingleTargetHit* LyraData = static_cast<const FLyraGameplayAbilityTargetData_SingleTargetHit*>(TargetData))
+								{
+									ClientFireServerTime = LyraData->ClientFireServerTime;
+								}
+							}
+						}
 
-						UE_LOG(LogLyraAbilitySystem, Log, TEXT("LagComp: ClientFire=%.3f hits=%d"), ClientFireServerTime, RewindHits.Num());
+						TArray<TArray<FHitResult>> RewindHits;
+
+						// Only rewind and validate for human players — bots are server-authoritative, no lag to compensate.
+						const bool bCallerIsHuman = (Controller && Controller->IsA<APlayerController>() && !Controller->IsA<AAIController>());
+						
+						if (bCallerIsHuman)
+						{
+							if (ClientFireServerTime == 0.0)
+							{
+								UE_LOG(LogLyraAbilitySystem, Warning,
+									TEXT("LagComp: ClientFireServerTime is 0 — timestamp missing or NetSerialize failed"));
+							}
+
+							UE_LOG(LogLyraAbilitySystem, Verbose,
+								TEXT("LagComp: Firing rewind trace — %d rays, ClientFireServerTime=%.3f"),
+								HitsToValidate.Num(), ClientFireServerTime);
+						
+							ULyraRangedWeaponInstance* WeaponData = GetWeaponInstance();
+							check(WeaponData);
+							
+							LagCompensationManager->RewindAndTrace(ClientFireServerTime, GetAvatarActorFromActorInfo(),
+									[&](TArray<TArray<FHitResult>>& OutHits)
+									{
+										for (const FHitResult* ToValidate : HitsToValidate)
+										{
+											UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: ValidationTrace Start=%s End=%s Radius=%.1f"),
+												*ToValidate->TraceStart.ToString(), *ToValidate->TraceEnd.ToString(), WeaponData->GetBulletTraceSweepRadius());
+											TArray<FHitResult> SweepHits;
+											DoSingleBulletTrace(ToValidate->TraceStart, ToValidate->TraceEnd, WeaponData->GetBulletTraceSweepRadius(), /*bIsSimulated=*/true, SweepHits);
+											OutHits.Add(MoveTemp(SweepHits));
+										}
+									}, RewindHits);
+							for (int32 i = 0; i < RewindHits.Num(); i++)
+							{
+								const FHitResult* Hit = ToValidateTargetDataHandle.Get(i)->GetHitResult();
+								
+								// Wall hits don't need validation either actors what don't have LagCompensationComponent — they should always pass
+								AActor* HitActor = Hit->GetActor();
+								if (!IsValid(HitActor) || !HitActor->FindComponentByClass<ULagCompensationComponent>())
+								{
+									ValidatedTargetDataHandle.Data.Add(ToValidateTargetDataHandle.Data[i]);
+									continue;
+								}
+								
+								const bool bCorroborated = RewindHits[i].ContainsByPredicate([HitActor](const FHitResult& RewindHit)
+									{
+										return HitActor == RewindHit.GetActor();
+									});
+								if (bCorroborated)
+								{
+									ValidatedTargetDataHandle.Data.Add(ToValidateTargetDataHandle.Data[i]);
+								}
+								else
+								{
+									FString ServerActorNames;
+									for (const FHitResult& RH : RewindHits[i])
+									{
+										if (AActor* A = RH.GetActor()) ServerActorNames += A->GetName() + TEXT(" ");
+									}
+									if (ServerActorNames.IsEmpty()) ServerActorNames = TEXT("none");
+									UE_LOG(LogLyraAbilitySystem, Log,
+										TEXT("LagComp: rejected hit on %s — server hit [%s] (ClientFire=%.3f ServerHits=%d)"),
+										*HitActor->GetName(), *ServerActorNames.TrimEnd(), ClientFireServerTime, RewindHits[i].Num());
+								}
+
+								UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: Ray %d — ClientFire=%.3f ServerHits=%d %s"),
+									i, ClientFireServerTime, RewindHits[i].Num(), bCorroborated ? TEXT("ACCEPTED") : TEXT("REJECTED"));
+							}
+
+							UE_LOG(LogLyraAbilitySystem, Verbose,
+								TEXT("LagComp: Validation complete — %d/%d entries accepted"),
+								ValidatedTargetDataHandle.Num(), ToValidateTargetDataHandle.Num());
+
+							TargetDataHandle = &ValidatedTargetDataHandle;
+						}
 					}
 					
 					// Confirm hit markers
 					if (ULyraWeaponStateComponent* WeaponStateComponent = Controller->FindComponentByClass<ULyraWeaponStateComponent>())
 					{
 						TArray<uint8> HitReplaces;
-						for (uint8 i = 0; (i < LocalTargetDataHandle.Num()) && (i < 255); ++i)
+						for (uint8 i = 0; (i < TargetDataHandle->Num()) && (i < 255); ++i)
 						{
-							if (FGameplayAbilityTargetData_SingleTargetHit* SingleTargetHit = static_cast<FGameplayAbilityTargetData_SingleTargetHit*>(LocalTargetDataHandle.Get(i)))
+							if (const FGameplayAbilityTargetData_SingleTargetHit* SingleTargetHit = static_cast<const FGameplayAbilityTargetData_SingleTargetHit*>(TargetDataHandle->Get(i)))
 							{
 								if (SingleTargetHit->bHitReplaced)
 								{
@@ -552,7 +637,7 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 							}
 						}
 
-						WeaponStateComponent->ClientConfirmTargetData(LocalTargetDataHandle.UniqueId, bIsTargetDataValid, HitReplaces);
+						WeaponStateComponent->ClientConfirmTargetData(TargetDataHandle->UniqueId, bIsTargetDataValid, HitReplaces);
 					}
 
 				}
@@ -570,7 +655,7 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 			WeaponData->AddSpread();
 
 			// Let the blueprint do stuff like apply effects to the targets
-			OnRangedWeaponTargetDataReady(LocalTargetDataHandle);
+			OnRangedWeaponTargetDataReady(*TargetDataHandle);
 		}
 		else
 		{
@@ -609,8 +694,8 @@ void ULyraGameplayAbility_RangedWeapon::StartRangedWeaponTargeting()
 	if (FoundHits.Num() > 0)
 	{
 		const int32 CartridgeID = FMath::Rand();
-		const AGameStateBase* GameState = GetWorld()->GetGameState();
-		const double ServerWorldTimeSeconds = GameState ? GameState->GetServerWorldTimeSeconds() : 0.0;
+		ALagCompensatedPlayerController* LagCompensatedController = Cast<ALagCompensatedPlayerController>(Controller);
+		double ServerWorldTimeSeconds = IsValid(LagCompensatedController) ? LagCompensatedController->GetServerTime() : 0.0;
 		
 		for (const FHitResult& FoundHit : FoundHits)
 		{

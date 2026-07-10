@@ -23,6 +23,7 @@ public class CommonGame : ModuleRules
 				"CommonUser",
 				"GameplayTags",
 				"ModularGameplayActors",
+				"LagCompensation",
 			}
 		);
 			

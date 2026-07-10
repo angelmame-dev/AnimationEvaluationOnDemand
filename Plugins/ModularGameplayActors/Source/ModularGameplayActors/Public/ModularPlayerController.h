@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "GameFramework/PlayerController.h"
+#include "LagCompensatedPlayerController.h"
 
 #include "ModularPlayerController.generated.h"
 
@@ -12,7 +12,7 @@ class UObject;
 
 /** Minimal class that supports extension by game feature plugins */
 UCLASS(MinimalAPI, Blueprintable)
-class AModularPlayerController : public APlayerController
+class AModularPlayerController : public ALagCompensatedPlayerController
 {
 	GENERATED_BODY()
 
