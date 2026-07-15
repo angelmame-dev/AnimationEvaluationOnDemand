@@ -12,6 +12,8 @@
 #include "DrawDebugHelpers.h"
 #include "LagCompensatedPlayerController.h"
 #include "LagCompensationManager.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/Character.h"
 #include "GameFramework/GameStateBase.h"
 #include "GameFramework/PlayerState.h"
 
@@ -19,6 +21,21 @@
 
 namespace LyraConsoleVariables
 {
+	static bool bDrawPruneTraceFilter = false;
+	static FAutoConsoleVariableRef CVarDrawFilterPruneSweep(
+		TEXT("lyra.Weapon.DrawPruneTraceFilter"),
+		bDrawPruneTraceFilter,
+		TEXT("Should we do debug drawing for bullet prune trace filter?"),
+		ECVF_Default);
+	
+	static float PruneTraceMaxDistance = 150.f;
+	static FAutoConsoleVariableRef CVarPruneTraceMaxDistance(
+		TEXT("lyra.Weapon.PruneTraceMaxDistance"),
+		PruneTraceMaxDistance,
+		TEXT("Max distance to shot trace by the shots will be pruned"),
+		ECVF_Default);
+
+
 	static float DrawBulletTracesDuration = 0.0f;
 	static FAutoConsoleVariableRef CVarDrawBulletTraceDuraton(
 		TEXT("lyra.Weapon.DrawBulletTraceDuration"),
@@ -312,6 +329,16 @@ FHitResult ULyraGameplayAbility_RangedWeapon::DoSingleBulletTrace(const FVector&
 		Impact = WeaponTrace(StartTrace, EndTrace, /*SweepRadius=*/ 0.0f, bIsSimulated, /*out*/ OutHits);
 	}
 
+	if (bIsSimulated)
+	{
+		FString LineHitNames;
+		for (const FHitResult& H : OutHits)
+			LineHitNames += FString::Printf(TEXT("%s(%.0fcm) "), H.GetActor() ? *H.GetActor()->GetName() : TEXT("None"), H.Distance);
+		UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: LineTrace %s — hits=[%s]"),
+			FindFirstPawnHitResult(OutHits) != INDEX_NONE ? TEXT("HIT PAWN") : TEXT("no pawn"),
+			OutHits.Num() > 0 ? *LineHitNames.TrimEnd() : TEXT("none"));
+	}
+
 	if (FindFirstPawnHitResult(OutHits) == INDEX_NONE)
 	{
 		// If this weapon didn't hit anything with a line trace and supports a sweep radius, try that
@@ -322,6 +349,18 @@ FHitResult ULyraGameplayAbility_RangedWeapon::DoSingleBulletTrace(const FVector&
 
 			// If the trace with sweep radius enabled hit a pawn, check if we should use its hit results
 			const int32 FirstPawnIdx = FindFirstPawnHitResult(SweepHits);
+
+			if (bIsSimulated)
+			{
+				FString SweepHitNames;
+				for (const FHitResult& H : SweepHits)
+					SweepHitNames += FString::Printf(TEXT("%s(%.0fcm) "), H.GetActor() ? *H.GetActor()->GetName() : TEXT("None"), H.Distance);
+				UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: SweepTrace(r=%.0f) %s — hits=[%s]"),
+					SweepRadius,
+					SweepHits.IsValidIndex(FirstPawnIdx) ? TEXT("HIT PAWN") : TEXT("no pawn / geometry blocks"),
+					SweepHits.Num() > 0 ? *SweepHitNames.TrimEnd() : TEXT("none"));
+			}
+
 			if (SweepHits.IsValidIndex(FirstPawnIdx))
 			{
 				// If we had a blocking hit in our line trace that occurs in SweepHits before our
@@ -337,6 +376,8 @@ FHitResult ULyraGameplayAbility_RangedWeapon::DoSingleBulletTrace(const FVector&
 					};
 					if (CurHitResult.bBlockingHit && OutHits.ContainsByPredicate(Pred))
 					{
+						UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: SweepHits discarded — blocking hit on %s in both line trace and sweep (before pawn)"),
+							CurHitResult.GetActor() ? *CurHitResult.GetActor()->GetName() : TEXT("None"));
 						bUseSweepHits = false;
 						break;
 					}
@@ -564,19 +605,41 @@ void ULyraGameplayAbility_RangedWeapon::OnTargetDataReadyCallback(const FGamepla
 						
 							ULyraRangedWeaponInstance* WeaponData = GetWeaponInstance();
 							check(WeaponData);
-							
-							LagCompensationManager->RewindAndTrace(ClientFireServerTime, GetAvatarActorFromActorInfo(),
-									[&](TArray<TArray<FHitResult>>& OutHits)
+
+							const ACharacter* AvatarCharacter = Cast<ACharacter>(GetAvatarActorFromActorInfo());
+							const float CapsuleHalfHeight = IsValid(AvatarCharacter) ? AvatarCharacter->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
+
+							auto FilterFunction = [&](const FVector& InterpolatedPosition)
+								{
+									const FVector CharacterCenter = InterpolatedPosition + FVector::UpVector * CapsuleHalfHeight;
+									for (int32 i = 0; i < HitsToValidate.Num(); ++i)
 									{
-										for (const FHitResult* ToValidate : HitsToValidate)
+										const float DistanceToCharacter = FMath::PointDistToSegment(CharacterCenter, HitsToValidate[i]->TraceStart, HitsToValidate[i]->TraceEnd);
+										if (DistanceToCharacter < LyraConsoleVariables::PruneTraceMaxDistance)
 										{
-											UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: ValidationTrace Start=%s End=%s Radius=%.1f"),
-												*ToValidate->TraceStart.ToString(), *ToValidate->TraceEnd.ToString(), WeaponData->GetBulletTraceSweepRadius());
-											TArray<FHitResult> SweepHits;
-											DoSingleBulletTrace(ToValidate->TraceStart, ToValidate->TraceEnd, WeaponData->GetBulletTraceSweepRadius(), /*bIsSimulated=*/true, SweepHits);
-											OutHits.Add(MoveTemp(SweepHits));
+											return false;
 										}
-									}, RewindHits);
+									}
+									UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: Pruned character at %s — no shot within %.1fcm corridor"),
+										*CharacterCenter.ToString(), LyraConsoleVariables::PruneTraceMaxDistance);
+									return true;
+								};
+
+							auto TraceFunction = [&](TArray<TArray<FHitResult>>& OutHits)
+								{
+									const float ValidationRadius = FMath::Max(WeaponData->GetBulletTraceSweepRadius(), ULagCompensationManager::GetValidationSweepRadius());
+									for (const FHitResult* ToValidate : HitsToValidate)
+									{
+										UE_LOG(LogLyraAbilitySystem, Verbose, TEXT("LagComp: ValidationTrace Start=%s End=%s Radius=%.1f"),
+											*ToValidate->TraceStart.ToString(), *ToValidate->TraceEnd.ToString(), ValidationRadius);
+										TArray<FHitResult> SweepHits;
+										DoSingleBulletTrace(ToValidate->TraceStart, ToValidate->TraceEnd, ValidationRadius, /*bIsSimulated=*/true, SweepHits);
+										OutHits.Add(MoveTemp(SweepHits));
+									}
+								};
+							
+							LagCompensationManager->RewindAndTrace(ClientFireServerTime, GetAvatarActorFromActorInfo(), FilterFunction, TraceFunction, RewindHits);
+							
 							for (int32 i = 0; i < RewindHits.Num(); i++)
 							{
 								const FHitResult* Hit = ToValidateTargetDataHandle.Get(i)->GetHitResult();
@@ -714,6 +777,16 @@ void ULyraGameplayAbility_RangedWeapon::StartRangedWeaponTargeting()
 		WeaponStateComponent->AddUnconfirmedServerSideHitMarkers(TargetData, FoundHits);
 	}
 
+#if ENABLE_DRAW_DEBUG
+	if (LyraConsoleVariables::bDrawPruneTraceFilter)
+	{
+		for (const FHitResult& Hit : FoundHits)
+		{
+			DrawDebugCylinder(GetWorld(), Hit.TraceStart, Hit.TraceEnd, LyraConsoleVariables::PruneTraceMaxDistance, 8, FColor::Blue, false, 5.f, 0, 1.0f);
+		}
+	}
+#endif
+	
 	// Process the target data immediately
 	OnTargetDataReadyCallback(TargetData, FGameplayTag());
 }
